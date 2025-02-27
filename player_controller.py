@@ -6,7 +6,7 @@ import webbrowser
 import subprocess
 from tkinter import messagebox, filedialog
 from audio_file_widget import AudioFileWidget
-from ffmpeg_utils import run_ffmpeg_command
+from ffmpeg_utils import run_ffmpeg_command, process_audio_in_thread
 
 class PlayerController:
     def __init__(self, app, audio_controller, ui, device_manager, theme_manager):
@@ -24,7 +24,7 @@ class PlayerController:
         self.ui.sidebar_vol_slider.set(self.audio_controller.volume)
         
     def update_global_progress(self):
-        """Update the global progress bar and time information with improved visuals"""
+        """Update the global progress bar and time information with reduced updates for better performance"""
         try:
             if self.audio_controller.is_playing:
                 position = self.audio_controller.position
@@ -33,56 +33,76 @@ class PlayerController:
                 if (duration > 0):  # Avoid division by zero
                     self.ui.global_progress.set(position / duration)
                 
-                # Update time labels with more readable format
+                # Update time labels only if they've changed significantly
+                # This reduces unnecessary UI updates for better performance
                 mins_elapsed = int(position // 60)
                 secs_elapsed = int(position % 60)
                 
                 mins_remaining = int((duration - position) // 60)
                 secs_remaining = int((duration - position) % 60)
                 
-                # Set the elapsed and remaining time labels
-                self.ui.time_elapsed.configure(text=f"{mins_elapsed}:{secs_elapsed:02d}")
-                self.ui.time_remaining.configure(text=f"-{mins_remaining}:{secs_remaining:02d}")
+                # Create formatted time strings
+                elapsed_str = f"{mins_elapsed}:{secs_elapsed:02d}"
+                remaining_str = f"-{mins_remaining}:{secs_remaining:02d}"
                 
-                # Update play/pause button state
-                self.ui.play_pause_btn.configure(
-                    text="⏸" if not self.audio_controller.is_paused else "▶",
-                    fg_color=self.theme_manager.get_color("accent_secondary") if not self.audio_controller.is_paused 
-                    else self.theme_manager.get_color("accent_primary")
-                )
+                # Only update if changed
+                if self.ui.time_elapsed.cget("text") != elapsed_str:
+                    self.ui.time_elapsed.configure(text=elapsed_str)
+                if self.ui.time_remaining.cget("text") != remaining_str:
+                    self.ui.time_remaining.configure(text=remaining_str)
                 
-                # Update current playing song info
+                # Update play/pause button state only when paused state changes
+                play_pause_text = "⏸" if not self.audio_controller.is_paused else "▶"
+                if self.ui.play_pause_btn.cget("text") != play_pause_text:
+                    self.ui.play_pause_btn.configure(
+                        text=play_pause_text,
+                        fg_color=self.theme_manager.get_color("accent_secondary") if not self.audio_controller.is_paused 
+                        else self.theme_manager.get_color("accent_primary")
+                    )
+                
+                # Update current playing song info only if changed
                 if self.audio_controller.current_widget:
                     file_name = self.audio_controller.current_widget.file_name
-                    self.ui.current_song_label.configure(text=file_name)
-                    
-                    # Highlight the current playing track in the list
-                    self.update_playing_highlight()
+                    if self.ui.current_song_label.cget("text") != file_name:
+                        self.ui.current_song_label.configure(text=file_name)
+                        self.update_playing_highlight()
             else:
                 # Reset time display when nothing is playing
-                self.ui.time_elapsed.configure(text="0:00")
-                self.ui.time_remaining.configure(text="-0:00")
-                self.ui.play_pause_btn.configure(
-                    text="▶",
-                    fg_color=self.theme_manager.get_color("accent_primary")
-                )
+                if self.ui.time_elapsed.cget("text") != "0:00":
+                    self.ui.time_elapsed.configure(text="0:00")
+                if self.ui.time_remaining.cget("text") != "-0:00":
+                    self.ui.time_remaining.configure(text="-0:00")
+                if self.ui.play_pause_btn.cget("text") != "▶":
+                    self.ui.play_pause_btn.configure(
+                        text="▶",
+                        fg_color=self.theme_manager.get_color("accent_primary")
+                    )
             
-            # Reschedule the timer
-            self.app.callback_timer_id = self.app.window.after(50, self.update_global_progress)
+            # Reschedule the timer with REDUCED frequency for better performance
+            self.app.callback_timer_id = self.app.window.after(100, self.update_global_progress)
         except Exception as e:
             print(f"Error updating progress: {e}")
             # Reschedule even on error
             self.app.callback_timer_id = self.app.window.after(1000, self.update_global_progress)
     
     def update_playing_highlight(self):
-        """Ensure the currently playing track is highlighted in the list"""
-        for widget in self.get_file_widgets():
-            if widget == self.audio_controller.current_widget:
-                widget.configure(fg_color=self.theme_manager.get_color("accent_primary"))
-                widget.playing_indicator.configure(fg_color=self.theme_manager.get_color("accent_secondary"))
-            else:
-                widget.configure(fg_color=self.theme_manager.get_color("bg_secondary"))
-                widget.playing_indicator.configure(fg_color="transparent")
+        """Ensure the currently playing track is highlighted in the list with safety checks"""
+        try:
+            widgets = self.get_file_widgets()
+            current_widget = self.audio_controller.current_widget
+            
+            for widget in widgets:
+                if widget == current_widget:
+                    # Check if widget still exists before updating
+                    if hasattr(widget, 'winfo_exists') and widget.winfo_exists():
+                        widget.configure(fg_color=self.theme_manager.get_color("accent_primary"))
+                        widget.playing_indicator.configure(fg_color=self.theme_manager.get_color("accent_secondary"))
+                else:
+                    if hasattr(widget, 'winfo_exists') and widget.winfo_exists():
+                        widget.configure(fg_color=self.theme_manager.get_color("bg_secondary"))
+                        widget.playing_indicator.configure(fg_color="transparent")
+        except Exception as e:
+            print(f"[ERROR] Error updating highlighting: {e}")
     
     def on_search(self, *args):
         """Filter files based on search text"""
@@ -95,30 +115,49 @@ class PlayerController:
     
     def toggle_global_playback(self):
         """Toggle play/pause for currently active track"""
+        print("[DEBUG] Toggle global playback called")
+        
         if self.audio_controller.is_playing:
             if self.audio_controller.is_paused:
+                print("[DEBUG] Resuming paused playback")
                 self.audio_controller.resume()
                 self.ui.play_pause_btn.configure(text="⏸")
             else:
+                print("[DEBUG] Pausing active playback")
                 self.audio_controller.pause()
                 self.ui.play_pause_btn.configure(text="▶")
         elif self.audio_controller.current_widget:
             # If a track was selected but stopped, restart it
+            print(f"[DEBUG] Restarting last track: {self.audio_controller.current_widget.file_name}")
             self.audio_controller.current_widget.toggle_play()
             self.ui.play_pause_btn.configure(text="⏸")
         else:
             # Play first track if nothing is selected
             widgets = self.get_file_widgets()
             if widgets:
+                print(f"[DEBUG] Playing first track: {widgets[0].file_name}")
                 widgets[0].toggle_play()
                 self.ui.play_pause_btn.configure(text="⏸")
+            else:
+                print("[DEBUG] No tracks available to play")
     
     def stop_global_playback(self):
         """Stop the currently playing track"""
+        print("[DEBUG] Stopping global playback")
         if self.audio_controller.is_playing:
+            current_widget = self.audio_controller.current_widget
             self.audio_controller.stop()
             self.ui.play_pause_btn.configure(text="▶")
             self.ui.current_song_label.configure(text="No song playing")
+            
+            # Update the widget UI state
+            if current_widget:
+                print(f"[DEBUG] Updating UI state for widget: {current_widget.file_name}")
+                current_widget.is_playing = False
+                current_widget.play_btn.configure(text="▶")
+                current_widget.update_ui_state()
+                
+            print("[DEBUG] Playback stopped successfully")
     
     def set_global_volume(self, value):
         """Set the global volume level"""
@@ -166,13 +205,19 @@ class PlayerController:
     
     def on_audio_ended(self, widget):
         """Called when audio playback ends"""
-        print(f"Audio ended, loop state: {self.is_looping}")
-        if self.audio_controller.is_looping:
-            # If looping is enabled, restart the same track after a small delay
-            self.app.window.after(100, lambda: widget.toggle_play())
-        else:
-            # Auto-play next track
-            self.next_track()
+        print(f"[DEBUG] Audio ended, loop state: {self.is_looping}, track: {widget.file_name}")
+        
+        try:
+            if self.audio_controller.is_looping:
+                # If looping is enabled, restart the same track after a small delay
+                print(f"[DEBUG] Looping track: {widget.file_name}")
+                self.app.window.after(100, lambda: widget.toggle_play())
+            else:
+                # Auto-play next track
+                print(f"[DEBUG] Auto-playing next track after: {widget.file_name}")
+                self.next_track()
+        except Exception as e:
+            print(f"[ERROR] Error in on_audio_ended: {e}")
     
     def get_file_widgets(self):
         """Get all current file widgets"""
@@ -193,16 +238,32 @@ class PlayerController:
             widgets[-1].toggle_play()  # Play the last track
     
     def next_track(self):
-        """Play the next track in the list"""
+        """Play the next track in the list with safety checks"""
         widgets = self.get_file_widgets()
         if not widgets:
+            print("[DEBUG] No tracks available to play next")
             return
+        
+        # Make sure the current widget is actually valid
+        current_widget = self.audio_controller.current_widget
+        if current_widget and (not hasattr(current_widget, 'winfo_exists') or not current_widget.winfo_exists()):
+            print("[DEBUG] Current widget no longer exists")
+            current_widget = None
+            self.audio_controller.current_widget = None
             
-        if self.audio_controller.current_widget in widgets:
-            current_index = widgets.index(self.audio_controller.current_widget)
+        if current_widget in widgets:
+            current_index = widgets.index(current_widget)
             next_index = (current_index + 1) % len(widgets)
+            print(f"[DEBUG] Playing next track: {widgets[next_index].file_name}")
+            
+            # Stop current track first to ensure clean state
+            if self.audio_controller.is_playing:
+                self.audio_controller.stop()
+                
+            # Play next track
             widgets[next_index].toggle_play()
         else:
+            print(f"[DEBUG] No current track - playing first: {widgets[0].file_name}")
             widgets[0].toggle_play()  # Play the first track
     
     def refresh_devices(self):
@@ -240,69 +301,77 @@ class PlayerController:
             messagebox.showerror("Error", f"Failed to change device: {str(e)}")
     
     def add_audio_file(self):
-        """Add a new audio file to the player"""
+        """Add a new audio file to the player with improved processing"""
         file_path = filedialog.askopenfilename(
-            filetypes=[("Audio Files", "*.mp3 *.wav *.ogg")]
+            filetypes=[("Audio Files", "*.mp3 *.wav *.ogg *.flac *.m4a")]
         )
-        if file_path:
-            print(f"\n=== Adding audio file: {file_path} ===")
+        if not file_path:
+            return
             
-            # Verify file exists and is readable
-            try:
-                with open(file_path, 'rb') as f:
-                    pass
-            except Exception as e:
-                print(f"Error: Cannot read file: {e}")
-                messagebox.showerror("Error", f"Cannot read file: {str(e)}")
+        print(f"\n=== Adding audio file: {file_path} ===")
+        
+        # Verify file exists and is readable
+        try:
+            with open(file_path, 'rb') as f:
+                pass
+        except Exception as e:
+            print(f"Error: Cannot read file: {e}")
+            messagebox.showerror("Error", f"Cannot read file: {str(e)}")
+            return
+
+        file_name = Path(file_path).name
+        cache_path = str(self.app.config_manager.cache_dir / file_name)
+        print(f"Cache path: {cache_path}")
+        
+        # Check if file is already cached with the same name
+        if file_name in self.app.settings["cached_files"]:
+            cached_file = Path(self.app.settings["cached_files"][file_name])
+            if cached_file.exists():
+                print("File already cached, reusing")
+                # Update file list and exit
+                self.update_file_list()
                 return
-
-            file_name = Path(file_path).name
-            cache_path = str(self.app.config_manager.cache_dir / file_name)
-            print(f"Cache path: {cache_path}")
+                
+        # Show a loading indicator or status message
+        loading_label = ctk.CTkLabel(
+            self.ui.files_list,
+            text=f"Converting {file_name}...",
+            fg_color=self.theme_manager.get_color("bg_secondary"),
+            corner_radius=6
+        )
+        loading_label.pack(fill="x", padx=5, pady=3)
+        self.ui.files_list.update()  # Force UI update to show loading message
+        
+        # Process the file in a background thread
+        def on_conversion_complete(success, error_msg):
+            # Remove loading indicator
+            loading_label.destroy()
             
-            try:
-                print("Loading audio file...")
-                # Modify AudioSegment to use the wrapper
-                AudioSegment.converter = "ffmpeg"
-                
-                # Fix: Set ffmpeg parameters to suppress console windows
-                # Try different methods to load the file
-                try:
-                    audio = AudioSegment.from_mp3(file_path)
-                except:
-                    try:
-                        audio = AudioSegment.from_file(file_path)
-                    except:
-                        audio = AudioSegment.from_file(file_path, format="mp3")
-
-                print(f"Audio details:")
-                print(f"- Format: {audio.channels} channels")
-                print(f"- Sample width: {audio.sample_width} bytes")
-                print(f"- Frame rate: {audio.frame_rate} Hz")
-                print(f"- Duration: {len(audio)/1000:.2f} seconds")
-                
-                print("Converting and caching file...")
-                audio.export(cache_path, format="wav")
+            if success:
                 print("File cached successfully")
-                
                 self.app.settings["cached_files"][file_name] = cache_path
                 self.app.config_manager.save_settings(self.app.settings)
                 self.update_file_list()
                 print("=== Audio file added successfully ===\n")
-                
-            except Exception as e:
-                error_msg = f"Failed to add audio file: {str(e)}"
-                print(f"Error: {error_msg}")
-                print(f"Exception type: {type(e).__name__}")
-                print(f"Full exception details: {repr(e)}")
+            else:
                 messagebox.showerror(
                     "Error", 
-                    "Failed to add audio file. Please ensure ffmpeg is installed.\n"
-                    f"Error details: {str(e)}"
+                    f"Failed to add audio file: {error_msg}\n\n"
+                    "Please ensure ffmpeg is installed properly."
                 )
+                
+        # Start conversion in background thread
+        process_audio_in_thread(
+            input_path=file_path,
+            output_path=cache_path,
+            format="wav",
+            callback=on_conversion_complete
+        )
     
     def update_file_list(self):
-        """Update the list of audio files in the UI"""
+        """Update the list of audio files in the UI with improved performance"""
+        print("[DEBUG] Updating file list")
+        
         # Clear existing widgets in files_list
         for widget in self.ui.files_list.winfo_children():
             widget.destroy()
@@ -311,13 +380,32 @@ class PlayerController:
         
         # Filter by search text if provided
         search_text = self.ui.search_var.get().lower()
+        if search_text:
+            print(f"[DEBUG] Filtering by search: '{search_text}'")
         
-        # Add each file as an AudioFileWidget
+        # Verify cache files exist before adding to UI
+        valid_files = {}
         for file_name, file_path in self.app.settings["cached_files"].items():
             # Apply search filter if needed
             if search_text and search_text not in file_name.lower():
                 continue
                 
+            # Check if file actually exists
+            path_obj = Path(file_path)
+            if path_obj.exists():
+                valid_files[file_name] = file_path
+            else:
+                # File was deleted or moved, remove from settings
+                print(f"[DEBUG] Removing missing file from cache: {file_name}")
+                del self.app.settings["cached_files"][file_name]
+                
+        # Save cleaned up settings
+        if len(valid_files) != len(self.app.settings["cached_files"]):
+            self.app.config_manager.save_settings(self.app.settings)
+        
+        # Add each valid file as an AudioFileWidget
+        print(f"[DEBUG] Adding {len(valid_files)} files to UI")
+        for file_name, file_path in valid_files.items():
             file_widget = AudioFileWidget(
                 self.ui.files_list,
                 file_name,
@@ -333,6 +421,8 @@ class PlayerController:
             file_widget.is_looping = self.audio_controller.is_looping
             
             self.app.file_widgets[file_name] = file_widget
+            
+        print("[DEBUG] File list updated successfully")
     
     def remove_file(self, file_name):
         """Remove an audio file from the player"""

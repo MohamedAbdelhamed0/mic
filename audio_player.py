@@ -15,6 +15,7 @@ from tkinter import messagebox
 from player_ui import PlayerUI
 from player_controller import PlayerController
 from pydub import AudioSegment
+from ffmpeg_utils import apply_ffmpeg_patches
 
 class AudioMicPlayer:
     def __init__(self):
@@ -53,46 +54,44 @@ class AudioMicPlayer:
         try:
             # Try to find ffmpeg in common locations
             ffmpeg_paths = [
+                r"C:\ffmpeg\bin",
                 r"C:\ffmpeg-7.1-essentials_build\ffmpeg-7.1-essentials_build\bin",
                 r"C:\ffmpeg-7.1-essentials_build\ffmpeg-7.1-essentials_build",
-                r"C:\ffmpeg\bin",
                 os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs\\ffmpeg\\bin'),
                 os.path.join(os.environ.get('PROGRAMFILES', ''), 'ffmpeg\\bin'),
+                # Look in current directory and subdirectories too
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg"),
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin"),
             ]
             
             ffmpeg_found = False
+            ffmpeg_path = ""
+            
             for path in ffmpeg_paths:
                 if os.path.exists(os.path.join(path, 'ffmpeg.exe')):
                     os.environ['PATH'] = path + os.pathsep + os.environ['PATH']
-                    print(f"Found ffmpeg in: {path}")
+                    ffmpeg_path = path
                     ffmpeg_found = True
+                    print(f"Found ffmpeg in: {path}")
                     break
 
-            # If ffmpeg found, configure pydub to use subprocess without console window
+            # If ffmpeg found, configure pydub
             if ffmpeg_found:
-                # Configure pydub to avoid console windows
-                AudioSegment.converter = os.path.join(path, "ffmpeg.exe")
+                # Set the ffmpeg path in AudioSegment
+                AudioSegment.converter = os.path.join(ffmpeg_path, "ffmpeg.exe")
                 
-                # Apply special handling when app is frozen (in executable)
-                if getattr(sys, 'frozen', False):
-                    # This ensures subprocess calls don't open console windows
-                    from ffmpeg_utils import run_ffmpeg_command
-                    # Monkey patch subprocess.run that pydub might use internally
-                    original_run = subprocess.run
-                    def patched_run(cmd, *args, **kwargs):
-                        if isinstance(cmd, list) and any('ffmpeg' in str(x) for x in cmd):
-                            return run_ffmpeg_command(cmd, *args, **kwargs)
-                        return original_run(cmd, *args, **kwargs)
-                    subprocess.run = patched_run
+                # Apply our patches to suppress console windows
+                apply_ffmpeg_patches()
+                
+                print("FFmpeg configured successfully")
             else:
                 # If not found, show error
                 messagebox.showerror(
                     "FFmpeg Not Found",
-                    "Please move ffmpeg to the correct location:\n"
-                    "1. Create folder: C:\\ffmpeg\\bin\n"
-                    "2. Copy ffmpeg.exe, ffprobe.exe from:\n"
-                    "   C:\\ffmpeg-7.1-essentials_build\\ffmpeg-7.1-essentials_build\\bin\n"
-                    "3. Paste them into: C:\\ffmpeg\\bin"
+                    "Please install FFmpeg to use this application:\n\n"
+                    "1. Download from: https://ffmpeg.org/download.html\n"
+                    "2. Extract to C:\\ffmpeg\n"
+                    "3. Restart the application"
                 )
                 
         except Exception as e:
@@ -137,14 +136,14 @@ class AudioMicPlayer:
         # Initialize keyboard shortcuts
         self.shortcuts = KeyboardShortcuts(self)
         
-        # Start progress update timer
+        # Start progress update timer - REDUCED FREQUENCY for better performance
         self.start_progress_timer()
     
     def start_progress_timer(self):
         # Cancel existing timer if any
         self.cancel_progress_timer()
-        # Start new timer
-        self.callback_timer_id = self.window.after(50, self.player_controller.update_global_progress)
+        # Start new timer with REDUCED frequency (100ms instead of 50ms) for better performance
+        self.callback_timer_id = self.window.after(100, self.player_controller.update_global_progress)
     
     def cancel_progress_timer(self):
         if self.callback_timer_id:
@@ -199,6 +198,14 @@ class AudioMicPlayer:
                 try:
                     process.kill()
                 except:
+                    pass
+                    
+            # Look for any ffmpeg processes that might be orphaned
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    if 'ffmpeg' in proc.info['name'].lower() or any('ffmpeg' in cmd.lower() for cmd in proc.info['cmdline'] if cmd):
+                        proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     pass
         except Exception as e:
             print(f"Error cleaning up processes: {e}")

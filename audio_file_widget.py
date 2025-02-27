@@ -1,6 +1,7 @@
 import customtkinter as ctk
 from pathlib import Path
 import time
+import threading
 from pydub import AudioSegment
 
 class AudioFileWidget(ctk.CTkFrame):
@@ -15,6 +16,11 @@ class AudioFileWidget(ctk.CTkFrame):
         self.is_looping = self.audio_controller.is_looping
         self.duration = 0  # Will be set when loaded
         self.setup_ui()
+        
+        # Load duration in background to prevent UI freezing
+        self.load_duration_thread = threading.Thread(target=self.load_duration_info_bg)
+        self.load_duration_thread.daemon = True
+        self.load_duration_thread.start()
         
     def setup_ui(self):
         # Main file container with a little spacing
@@ -47,6 +53,19 @@ class AudioFileWidget(ctk.CTkFrame):
             corner_radius=15  # Make it circular
         )
         self.play_btn.pack(side="left", padx=(0, 8))
+        
+        # MOVED: Remove button next to play button as requested
+        self.remove_btn = ctk.CTkButton(
+            left_frame,
+            text="✕",
+            width=28,
+            height=28, 
+            corner_radius=14,
+            fg_color="#3a3a5e",
+            hover_color="#f72585",
+            command=lambda: self.on_remove(self.file_name)
+        )
+        self.remove_btn.pack(side="left", padx=(0, 8))
         
         # File name label
         self.file_label = ctk.CTkLabel(
@@ -85,19 +104,6 @@ class AudioFileWidget(ctk.CTkFrame):
         )
         self.fav_btn.pack(side="left", padx=2)
         
-        # Remove button
-        self.remove_btn = ctk.CTkButton(
-            controls,
-            text="✕",
-            width=28,
-            height=28, 
-            corner_radius=14,
-            fg_color="#3a3a5e",
-            hover_color="#f72585",
-            command=lambda: self.on_remove(self.file_name)
-        )
-        self.remove_btn.pack(side="left", padx=2)
-        
         # Add hover effect
         self.bind("<Enter>", self.on_enter)
         self.bind("<Leave>", self.on_leave)
@@ -105,35 +111,65 @@ class AudioFileWidget(ctk.CTkFrame):
         # Try to load duration info
         self.load_duration_info()
     
-    def load_duration_info(self):
-        """Load duration information for display"""
+    def load_duration_info_bg(self):
+        """Load duration information in background thread to prevent UI freezing"""
         try:
-            # Load audio just to get duration
-            audio = AudioSegment.from_file(self.file_path)
-            duration_sec = len(audio) / 1000
+            # Check if this is a WAV file to use a faster method
+            if self.file_path.lower().endswith('.wav'):
+                # Use Wave module which is much faster for WAV files
+                import wave
+                with wave.open(self.file_path, 'rb') as wf:
+                    frames = wf.getnframes()
+                    rate = wf.getframerate()
+                    duration_sec = frames / float(rate)
+            else:
+                # Fallback to pydub for other formats
+                audio = AudioSegment.from_file(self.file_path)
+                duration_sec = len(audio) / 1000
+                
             self.duration = duration_sec
             mins = int(duration_sec // 60)
             secs = int(duration_sec % 60)
-            self.duration_label.configure(text=f"{mins}:{secs:02d}")
-        except Exception:
-            self.duration_label.configure(text="--:--")
+            
+            # Update the UI in the main thread
+            self.after(0, lambda: self.duration_label.configure(text=f"{mins}:{secs:02d}"))
+        except Exception as e:
+            print(f"Error loading duration for {self.file_name}: {e}")
+            self.after(0, lambda: self.duration_label.configure(text="--:--"))
+    
+    def load_duration_info(self):
+        """Placeholder that starts the background loading"""
+        # The actual loading happens in the background thread
+        # This just sets a waiting indicator
+        self.duration_label.configure(text="...")
     
     def toggle_play(self):
+        print(f"[DEBUG] Toggle play clicked for {self.file_name}, current state: {self.is_playing}")
         if self.is_playing:
+            print(f"[DEBUG] Pausing track: {self.file_name}")
             self.audio_controller.pause()
             self.is_playing = False
             self.play_btn.configure(text="▶")
         else:
             # Stop any other playing tracks first
-            if self.audio_controller.current_widget and self.audio_controller.current_widget != self:
-                self.audio_controller.current_widget.update_play_button("▶")
-                self.audio_controller.current_widget.is_playing = False
+            prev_widget = self.audio_controller.current_widget
+            if prev_widget and prev_widget != self:
+                print(f"[DEBUG] Stopping previous track to play: {self.file_name}")
+                # FIXED: Safely stop previous track, avoid direct widget calls
+                self.audio_controller.stop_previous_widget()
             
             # Start this track
-            self.audio_controller.load_audio(self.file_path, self)
-            self.audio_controller.play(self.is_looping)
-            self.is_playing = True
-            self.play_btn.configure(text="⏸")
+            print(f"[DEBUG] Starting to play track: {self.file_name}")
+            try:
+                # Ensure we fully stop any previous playback first
+                self.audio_controller.stop()
+                self.audio_controller.load_audio(self.file_path, self)
+                self.audio_controller.play(self.is_looping)
+                self.is_playing = True
+                self.play_btn.configure(text="⏸")
+                print(f"[DEBUG] Track started successfully: {self.file_name}")
+            except Exception as e:
+                print(f"[ERROR] Failed to play track {self.file_name}: {e}")
         
         # Update widget appearance
         self.update_ui_state()
@@ -165,8 +201,12 @@ class AudioFileWidget(ctk.CTkFrame):
             self.playing_indicator.configure(fg_color="transparent")  # Hide indicator
     
     def update_play_button(self, symbol):
-        """Update just the play button symbol"""
-        self.play_btn.configure(text=symbol)
+        """Update just the play button symbol with safety check"""
+        try:
+            if self.winfo_exists():  # Check if widget still exists before changing
+                self.play_btn.configure(text=symbol)
+        except Exception as e:
+            print(f"[ERROR] Failed to update play button: {e}")
     
     def update_loop_button(self):
         """Update loop button appearance based on global state"""
